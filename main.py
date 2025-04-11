@@ -1,3 +1,4 @@
+import asyncpg
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -7,6 +8,7 @@ from sqlalchemy import Column, Integer, String, select
 from starlette.status import HTTP_401_UNAUTHORIZED
 from contextlib import asynccontextmanager
 import secrets
+import os
 
 # --- USERS & AUTH ---
 security = HTTPBasic()
@@ -26,11 +28,23 @@ def get_current_user(credentials: HTTPBasicCredentials = Depends(security)):
             headers={"WWW-Authenticate": "Basic"},
         )
     return {"username": credentials.username, "role": user["role"]}
-
+import ssl
+import json
 # --- DATABASE SETUP ---
-DATABASE_URL = "sqlite+aiosqlite:///./test.db"
+ssl_context = ssl.create_default_context()
+ssl_context.check_hostname = False  # or True depending on your use case
+ssl_context.verify_mode = ssl.CERT_NONE 
+# Load database URL from config.json
+config_path = os.path.join(os.path.dirname(__file__), "config.json")
+with open(config_path, "r") as config_file:
+    config = json.load(config_file)
 
-engine = create_async_engine(DATABASE_URL, echo=True)
+DATABASE_URL = config.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL is not set in config.json")
+
+# Async database engine setup with asyncpg
+engine = create_async_engine(DATABASE_URL, echo=True, pool_pre_ping=True, connect_args={"ssl": ssl_context},)
 Base = declarative_base()
 
 class Person(Base):
@@ -65,20 +79,64 @@ async def dashboard(user=Depends(get_current_user)):
         <title>Points Dashboard</title>
         <style>
             body {{
-                font-family: Arial;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                 margin: 40px;
+                background-color: #f7f9fc;
+                color: #333;
+            }}
+            h2 {{
+                margin-bottom: 10px;
+            }}
+            h3 {{
+                margin-top: 30px;
             }}
             input, button {{
                 margin: 5px;
-                padding: 5px;
+                padding: 10px;
+                font-size: 16px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+            }}
+            button {{
+                background-color: #007bff;
+                color: white;
+                border: none;
+                cursor: pointer;
+            }}
+            button:hover {{
+                background-color: #0056b3;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+                background-color: white;
+                box-shadow: 0 0 10px rgba(0,0,0,0.05);
+            }}
+            th, td {{
+                padding: 12px 16px;
+                border-bottom: 1px solid #e2e2e2;
+                text-align: left;
+            }}
+            thead {{
+                background-color: #f0f2f5;
+                font-weight: bold;
+            }}
+            tr:hover {{
+                background-color: #f5faff;
             }}
         </style>
     </head>
     <body>
-        <h2>Welcome, {user["username"]} ({user["role"]})</h2>
-
-        <h3>Points:</h3>
-        <ul id="personList"></ul>
+        <table id="personTable">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Points</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
 
         {"<h3>Add Person:</h3>" if is_admin else ""}
         {"<input type='text' id='newName' placeholder='Name'>" if is_admin else ""}
@@ -97,12 +155,12 @@ async def dashboard(user=Depends(get_current_user)):
                     headers: {{ Authorization: authHeader }}
                 }});
                 const data = await res.json();
-                const list = document.getElementById("personList");
-                list.innerHTML = "";
+                const tbody = document.querySelector("#personTable tbody");
+                tbody.innerHTML = "";
                 data.forEach(p => {{
-                    const li = document.createElement("li");
-                    li.textContent = `${{p.name}} - ${{p.points}} points`;
-                    list.appendChild(li);
+                    const row = document.createElement("tr");
+                    row.innerHTML = `<td>${{p.name}}</td><td>${{p.points}}</td>`;
+                    tbody.appendChild(row);
                 }});
             }}
 
@@ -132,12 +190,13 @@ async def dashboard(user=Depends(get_current_user)):
     </body>
     </html>
     """
+
     return HTMLResponse(content=html_content)
 
 @app.get("/persons")
 async def get_persons(user=Depends(get_current_user)):
     async with SessionLocal() as session:
-        result = await session.execute(select(Person))
+        result = await session.execute(select(Person).order_by(Person.points.asc()))
         people = result.scalars().all()
         return [{"name": p.name, "points": p.points} for p in people]
 
